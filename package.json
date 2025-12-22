@@ -1,0 +1,8 @@
+{
+  "name": "btc-loteria-73",
+  "version": "1.0.0",
+  "main": "fast-loteria.js",
+  "dependencies": {
+    "secp256k1": "^5.0.1"
+  }
+}
