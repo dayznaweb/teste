@@ -10,21 +10,34 @@ const RANGE_START = BigInt("0x200");
 const RANGE_END = BigInt("0x3ff");
 const RANGE_DIFF = RANGE_END - RANGE_START;
 
-// Variáveis de Ambiente para segurança
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// VARIÁVEL DE TRAVA GLOBAL (Thread Principal)
+let jaEnviouAlerta = false;
+
 function sendAlert(privKey) {
+    // Se já enviou uma vez nesta sessão, bloqueia as próximas
+    if (jaEnviouAlerta) return;
+    jaEnviouAlerta = true;
+
     if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
         console.log("\n⚠️ Telegram não configurado. Chave: " + privKey);
         return;
     }
+
     const message = `🚀 CHAVE ENCONTRADA (PUZZLE 73)! %0A%0APRIVADA: ${privKey}`;
     const cmd = `curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage -d chat_id=${TELEGRAM_CHAT_ID} -d text="${message}"`;
     
     exec(cmd, (err) => {
-        if (err) console.error("\n❌ Erro ao enviar Telegram");
-        else console.log("\n✅ Alerta enviado ao Telegram!");
+        if (err) {
+            console.error("\n❌ Erro ao enviar Telegram");
+            jaEnviouAlerta = false; // Permite tentar de novo apenas se deu erro no envio
+        } else {
+            console.log("\n✅ Alerta enviado com sucesso ao Telegram!");
+            // Encerra tudo após o envio bem-sucedido
+            setTimeout(() => process.exit(0), 2000);
+        }
     });
 }
 
@@ -39,19 +52,24 @@ if (isMainThread) {
         const worker = new Worker(__filename);
         worker.on('message', (msg) => {
             if (msg.type === 'found') {
-                console.log(`\n\x1b[42m\x1b[30m !!! SUCESSO: ${msg.priv} !!! \x1b[0m`);
+                // Chama a função de alerta que possui a trava
                 sendAlert(msg.priv);
-                setTimeout(() => process.exit(), 5000);
+                // Comando imediato para parar de processar novas chaves
+                console.log(`\n\x1b[42m\x1b[30m !!! ENCONTRADA: ${msg.priv} !!! \x1b[0m`);
             }
             if (msg.type === 'stats') {
                 totalChecked += msg.count;
-                const elapsed = (Date.now() - startTime) / 1000;
-                const speed = Math.floor(totalChecked / elapsed);
-                process.stdout.write(`\r\x1b[36m> Velocidade: ${speed.toLocaleString()} keys/s | Total: ${totalChecked.toLocaleString()}\x1b[0m`);
+                // Reduzi a frequência de atualização do console para poupar processamento
+                if (totalChecked % 50000 === 0) {
+                    const elapsed = (Date.now() - startTime) / 1000;
+                    const speed = Math.floor(totalChecked / elapsed);
+                    process.stdout.write(`\r\x1b[36m> Velocidade: ${speed.toLocaleString()} keys/s | Total: ${totalChecked.toLocaleString()}\x1b[0m`);
+                }
             }
         });
     }
 } else {
+    // Lógica dos Workers (Filhos)
     const targetBuf = Buffer.from(TARGET_PUBKEY_COMPRESSED, 'hex');
     let count = 0;
     const batchSize = 10000;
@@ -65,6 +83,8 @@ if (isMainThread) {
             const pubKey = secp256k1.publicKeyCreate(finalPrivBuf, true);
             if (Buffer.compare(pubKey, targetBuf) === 0) {
                 parentPort.postMessage({ type: 'found', priv: finalPrivBuf.toString('hex') });
+                // Para o loop interno imediatamente após encontrar
+                break; 
             }
         } catch (e) {}
 
