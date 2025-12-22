@@ -5,9 +5,9 @@ const os = require('os');
 const { exec } = require('child_process');
 
 // Configurações do Puzzle #73
-const TARGET_PUBKEY_COMPRESSED = "03a7a4c30291ac1db24b4ab00c442aa832f7794b5a0959bec6e8d7fee802289dcd";
-const RANGE_START = BigInt("0x200");
-const RANGE_END = BigInt("0x3ff");
+const TARGET_PUBKEY_COMPRESSED = "033c4a45cbd643ff97d77f41ea37e843648d50fd894b864b0d52febc62f6454f7c";
+const RANGE_START = BigInt("0x80000");
+const RANGE_END = BigInt("0xfffff");
 const RANGE_DIFF = RANGE_END - RANGE_START;
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
