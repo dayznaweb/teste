@@ -1,0 +1,27 @@
+name: BitLoteria_Turbo
+
+on:
+  workflow_dispatch: # Permite dar o "Play" manual
+  schedule:
+    - cron: '0 */6 * * *' # Roda a cada 6 horas automaticamente
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Dependencias
+        run: npm install
+
+      - name: Executar Busca
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        timeout-minutes: 340 # Para antes do limite de 6h do GitHub
+        run: node fast-loteria.js
