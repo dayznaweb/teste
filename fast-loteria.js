@@ -5,9 +5,9 @@ const os = require('os');
 const { exec } = require('child_process');
 
 // Configurações do Puzzle #73
-const TARGET_PUBKEY_COMPRESSED = "033c4a45cbd643ff97d77f41ea37e843648d50fd894b864b0d52febc62f6454f7c";
-const RANGE_START = BigInt("0x80000");
-const RANGE_END = BigInt("0xfffff");
+const TARGET_PUBKEY_COMPRESSED = "02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16";
+const RANGE_START = BigInt("0x4000000000000000000000000000000000");
+const RANGE_END = BigInt("0x7fffffffffffffffffffffffffffffffff");
 const RANGE_DIFF = RANGE_END - RANGE_START;
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -26,7 +26,7 @@ function sendAlert(privKey) {
         return;
     }
 
-    const message = `🚀 CHAVE ENCONTRADA (PUZZLE 73)! %0A%0APRIVADA: ${privKey}`;
+    const message = `🚀 135: ${privKey}`;
     const cmd = `curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage -d chat_id=${TELEGRAM_CHAT_ID} -d text="${message}"`;
     
     exec(cmd, (err) => {
