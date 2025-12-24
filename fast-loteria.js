@@ -1,188 +1,241 @@
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const crypto = require('crypto');
 const secp256k1 = require('secp256k1');
+const os = require('os');
 const fs = require('fs');
+const { exec } = require('child_process');
 
-// Puzzle #73
+// CONFIGURAÇÃO DO PUZZLE 73
 const TARGET_ADDRESS = "12VVRNPi4SJqUTsp6FmqDqY5sGosDtysn4";
 const TARGET_PUBKEY = "032b7b9e07f8ea0c8f9cbf4dfca6d2c8b163e6f0b49f09b7c73636b6d9142c9c0f";
 const RANGE_START = BigInt("0x1000000000000000000"); // 2^72
 const RANGE_END = BigInt("0x1ffffffffffffffffff");   // 2^73-1
 
-// Filtros de padrões (mantém o código rápido)
+// Telegram config
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// ==================== FILTROS INTELIGENTES ====================
+
+// Detecta padrões suspeitos (rápido)
 function isSuspiciousPattern(hexKey) {
-  // 1. Muitos caracteres repetidos (ex: AAAAAAAAA...)
-  if (/(.)\1{20,}/.test(hexKey)) return true;
-  
-  // 2. Sequências (123456789abcdef...)
-  if (hexKey.includes('0123456789abcdef') || 
-      hexKey.includes('fedcba9876543210')) return true;
-  
-  // 3. Padrões comuns (deadbeef, cafebabe, etc)
-  if (hexKey.includes('deadbeef') || 
-      hexKey.includes('cafebabe') || 
-      hexKey.includes('00000000') ||
-      hexKey.includes('ffffffff')) return true;
-  
-  // 4. Muitos zeros no início/fim
-  if (hexKey.startsWith('000000') || hexKey.endsWith('000000')) return true;
-  
-  // 5. Palíndromos simples (verifica só os primeiros/last 16 chars)
-  const first16 = hexKey.substring(0, 16);
-  const last16 = hexKey.substring(48, 64);
-  if (first16 === last16.split('').reverse().join('')) return true;
-  
-  return false;
+    // 1. Padrões de repetição (ex: AAAAA...)
+    if (/(.)\1{15,}/.test(hexKey)) return true;
+    
+    // 2. Sequências simples
+    if (hexKey.includes('0123456789abcdef') || 
+        hexKey.includes('fedcba9876543210') ||
+        hexKey.includes('1234567890abcdef')) return true;
+    
+    // 3. Padrões conhecidos (deadbeef, cafebabe, etc)
+    const knownPatterns = [
+        'deadbeef', 'cafebabe', '00000000', 'ffffffff',
+        'aaaaaaaa', '55555555', '33333333', 'cccccccc'
+    ];
+    for (const pattern of knownPatterns) {
+        if (hexKey.includes(pattern)) return true;
+    }
+    
+    // 4. Muitos zeros ou Fs no início/fim
+    if (/^0{12,}/.test(hexKey) || /f{12,}$/.test(hexKey)) return true;
+    
+    // 5. Padrão alternante (ababab...)
+    if (/^(ab|cd|ef|01){16,}/.test(hexKey)) return true;
+    
+    return false;
 }
 
-// Verifica baixa entropia (versão simples)
+// Verifica entropia baixa (simples e rápido)
 function isLowEntropy(hexKey) {
-  // Conta caracteres únicos
-  const unique = new Set(hexKey).size;
-  if (unique < 8) return true; // Muito poucos caracteres diferentes
-  
-  // Verifica se algum caractere aparece muito
-  const counts = {};
-  for (const char of hexKey) {
-    counts[char] = (counts[char] || 0) + 1;
-  }
-  for (const char in counts) {
-    if (counts[char] > hexKey.length * 0.4) return true; // >40% é suspeito
-  }
-  
-  return false;
+    // Conta caracteres únicos
+    const unique = new Set(hexKey).size;
+    if (unique < 10) return true; // Muito pouca variedade
+    
+    // Verifica distribuição (se algum char domina)
+    const charCount = {};
+    for (const char of hexKey) {
+        charCount[char] = (charCount[char] || 0) + 1;
+        if (charCount[char] > hexKey.length * 0.3) return true; // >30% é suspeito
+    }
+    
+    return false;
 }
 
-// Telegram alert
-function sendAlert(privKey) {
-  const token = process.env.TELEGRAM_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return;
-  
-  const message = `🚀 PUZZLE 73 ENCONTRADO! ${privKey}`;
-  require('child_process').exec(
-    `curl -s -X POST https://api.telegram.org/bot${token}/sendMessage -d chat_id=${chatId} -d text="${message}"`
-  );
+// Notificação Telegram
+function sendAlert(privateKey) {
+    if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
+    
+    const message = `🚀 BITCOIN PUZZLE 73 RESOLVIDO!\n\n🔑 ${privateKey}\n📭 ${TARGET_ADDRESS}`;
+    const cmd = `curl -s -X POST https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage -d chat_id=${TELEGRAM_CHAT_ID} -d text="${message}"`;
+    
+    exec(cmd, (error) => {
+        if (!error) console.log("\n✅ Alerta enviado para Telegram!");
+    });
 }
+
+// ==================== WORKER THREAD ====================
 
 if (isMainThread) {
-  // Lê último ponto salvo
-  let startKey;
-  try {
-    const saved = fs.readFileSync('last_key.txt', 'utf8').trim();
-    startKey = BigInt(saved);
-    console.log(`🔁 Retomando de: 0x${startKey.toString(16)}`);
-  } catch (e) {
-    startKey = RANGE_START;
-    console.log(`🚀 Iniciando do começo: 0x${startKey.toString(16)}`);
-  }
-  
-  const numThreads = require('os').cpus().length;
-  let totalChecked = 0;
-  const startTime = Date.now();
-  
-  // Divide o trabalho
-  for (let i = 0; i < numThreads; i++) {
-    const worker = new Worker(__filename, {
-      workerData: {
-        workerId: i,
-        startKey: (startKey + BigInt(i * 1000000)).toString(16), // Cada worker começa diferente
-        targetPubKey: TARGET_PUBKEY
-      }
-    });
+    // Carrega progresso salvo
+    let startKey;
+    try {
+        const saved = fs.readFileSync('last_key.txt', 'utf8').trim();
+        startKey = BigInt(saved);
+        console.log(`\x1b[32m[RETOMANDO]\x1b[0m 0x${startKey.toString(16)}`);
+    } catch (e) {
+        startKey = RANGE_START;
+        console.log(`\x1b[33m[INICIANDO]\x1b[0m 0x${startKey.toString(16)}`);
+    }
     
-    worker.on('message', (msg) => {
-      if (msg.found) {
-        console.log(`\n🎉 CHAVE ENCONTRADA pelo Worker ${msg.workerId}!`);
-        console.log(`🔑 ${msg.privateKey}`);
-        fs.writeFileSync('FOUND.txt', msg.privateKey);
-        sendAlert(msg.privateKey);
+    // Configura workers (um por CPU)
+    const numCPUs = os.cpus().length;
+    let totalChecked = 0;
+    let patternsFound = 0;
+    const startTime = Date.now();
+    let lastSavedKey = startKey;
+    
+    console.log(`\x1b[36m[INFO]\x1b[0m Usando ${numCPUs} CPUs`);
+    console.log(`\x1b[36m[INFO]\x1b[0m Alvo: ${TARGET_ADDRESS}`);
+    console.log('─'.repeat(60));
+    
+    for (let i = 0; i < numCPUs; i++) {
+        // Cada worker pega um pedaço do range
+        const workerStart = startKey + (BigInt(i) * BigInt(10000000));
+        const workerEnd = workerStart + BigInt(1000000000); // 1 bilhão de chaves
+        
+        const worker = new Worker(__filename, {
+            workerData: {
+                workerId: i,
+                startKey: workerStart.toString(16),
+                endKey: workerEnd > RANGE_END ? RANGE_END.toString(16) : workerEnd.toString(16),
+                targetPubKey: TARGET_PUBKEY
+            }
+        });
+        
+        worker.on('message', (msg) => {
+            if (msg.type === 'found') {
+                console.log(`\n\x1b[1;32m🎉 CHAVE ENCONTRADA!\x1b[0m`);
+                console.log(`\x1b[32mWorker ${msg.workerId}: ${msg.privateKey}\x1b[0m`);
+                
+                // Salva em arquivo
+                fs.writeFileSync('FOUND_KEY.txt', msg.privateKey);
+                fs.appendFileSync('history.txt', 
+                    `[${new Date().toISOString()}] ${msg.privateKey}\n`);
+                
+                // Notifica
+                sendAlert(msg.privateKey);
+                
+                // Mata todos workers
+                process.exit(0);
+            }
+            
+            if (msg.type === 'stats') {
+                totalChecked += msg.checked;
+                patternsFound += msg.patterns;
+                
+                // Atualiza última chave para salvar progresso
+                if (msg.lastKey) {
+                    const keyNum = BigInt('0x' + msg.lastKey);
+                    if (keyNum > lastSavedKey) lastSavedKey = keyNum;
+                }
+                
+                // Display progresso
+                const elapsed = (Date.now() - startTime) / 1000;
+                const speed = Math.floor(totalChecked / elapsed);
+                const hours = (elapsed / 3600).toFixed(2);
+                
+                process.stdout.write(
+                    `\r\x1b[36m[STATS]\x1b[0m ` +
+                    `⏱️ ${hours}h | ` +
+                    `🔍 ${totalChecked.toLocaleString()} | ` +
+                    `🎯 ${patternsFound.toLocaleString()} padrões | ` +
+                    `⚡ ${speed.toLocaleString()}/s`
+                );
+            }
+        });
+        
+        worker.on('exit', (code) => {
+            if (code !== 0) console.log(`\nWorker ${i} saiu com código ${code}`);
+        });
+    }
+    
+    // Salva progresso periodicamente
+    setInterval(() => {
+        fs.writeFileSync('last_key.txt', lastSavedKey.toString());
+    }, 30000); // A cada 30 segundos
+    
+    // Salva ao sair
+    process.on('SIGINT', () => {
+        console.log('\n💾 Salvando progresso...');
+        fs.writeFileSync('last_key.txt', lastSavedKey.toString());
         process.exit(0);
-      }
-      
-      if (msg.progress) {
-        totalChecked += msg.checked;
-        const elapsed = (Date.now() - startTime) / 1000;
-        const speed = Math.floor(totalChecked / elapsed);
-        process.stdout.write(`\r⚡ ${speed.toLocaleString()}/s | Total: ${totalChecked.toLocaleString()} | Padrões: ${msg.patterns}`);
-        
-        // Salva progresso a cada 100k chaves
-        if (msg.lastKey) {
-          fs.writeFileSync('last_key.txt', BigInt('0x' + msg.lastKey).toString());
-        }
-      }
     });
-  }
-  
-  // Salva ao sair
-  process.on('SIGINT', () => {
-    console.log('\n💾 Salvando progresso...');
-    process.exit(0);
-  });
-  
+    
 } else {
-  // Worker thread
-  const { workerId, startKey, targetPubKey } = workerData;
-  let currentKey = BigInt('0x' + startKey);
-  const targetBuffer = Buffer.from(targetPubKey, 'hex');
-  let patternsFound = 0;
-  let batchCounter = 0;
-  
-  while (true) {
-    // Gera chave hex (sempre 64 chars)
-    let hexKey = currentKey.toString(16).padStart(64, '0');
-    if (hexKey.length > 64) hexKey = hexKey.slice(-64);
+    // ==================== CÓDIGO DO WORKER ====================
+    const { workerId, startKey, endKey, targetPubKey } = workerData;
+    let currentKey = BigInt('0x' + startKey);
+    const maxKey = BigInt('0x' + endKey);
+    const targetBuffer = Buffer.from(targetPubKey, 'hex');
     
-    // FILTRO RÁPIDO: Só verifica se for padrão suspeito OU baixa entropia
-    const isPattern = isSuspiciousPattern(hexKey);
-    const isLowEnt = isLowEntropy(hexKey);
+    let batchCounter = 0;
+    let patternsFound = 0;
+    const BATCH_SIZE = 5000; // Relatórios a cada 5k chaves
     
-    if (isPattern || isLowEnt) {
-      patternsFound++;
-      
-      try {
-        // Só calcula chave pública se passou no filtro
-        const privBuffer = Buffer.from(hexKey, 'hex');
-        const pubKey = secp256k1.publicKeyCreate(privBuffer, true);
+    while (currentKey <= maxKey) {
+        // Converte para hex (sempre 64 caracteres)
+        let hexKey = currentKey.toString(16).padStart(64, '0');
+        if (hexKey.length > 64) hexKey = hexKey.slice(-64);
         
-        if (Buffer.compare(pubKey, targetBuffer) === 0) {
-          parentPort.postMessage({
-            found: true,
-            workerId: workerId,
-            privateKey: hexKey
-          });
-          break;
+        // FILTRO INTELIGENTE: Só processa se for suspeito
+        const isPattern = isSuspiciousPattern(hexKey);
+        const isLowEnt = isLowEntropy(hexKey);
+        
+        if (isPattern || isLowEnt) {
+            patternsFound++;
+            
+            try {
+                // Tenta gerar chave pública
+                const privBuffer = Buffer.from(hexKey, 'hex');
+                const pubKey = secp256k1.publicKeyCreate(privBuffer, true);
+                
+                // Verifica se é a chave alvo
+                if (pubKey.equals(targetBuffer)) {
+                    parentPort.postMessage({
+                        type: 'found',
+                        workerId: workerId,
+                        privateKey: hexKey
+                    });
+                    return;
+                }
+            } catch (e) {
+                // Chave inválida, continua
+            }
         }
-      } catch (e) {
-        // Chave inválida, continua
-      }
+        
+        currentKey++;
+        batchCounter++;
+        
+        // Envia estatísticas periodicamente
+        if (batchCounter >= BATCH_SIZE) {
+            parentPort.postMessage({
+                type: 'stats',
+                workerId: workerId,
+                checked: batchCounter,
+                patterns: patternsFound,
+                lastKey: currentKey.toString(16)
+            });
+            batchCounter = 0;
+            patternsFound = 0;
+        }
     }
     
-    currentKey++;
-    batchCounter++;
-    
-    // Reporta progresso a cada 1000 chaves
-    if (batchCounter >= 1000) {
-      parentPort.postMessage({
-        progress: true,
-        workerId: workerId,
-        checked: batchCounter,
-        patterns: patternsFound,
-        lastKey: currentKey.toString(16)
-      });
-      batchCounter = 0;
-    }
-    
-    // Para se chegou muito longe (safety)
-    if (currentKey > RANGE_END) {
-      parentPort.postMessage({
-        progress: true,
+    // Worker terminou seu intervalo
+    parentPort.postMessage({
+        type: 'stats',
         workerId: workerId,
         checked: batchCounter,
         patterns: patternsFound,
         done: true
-      });
-      break;
-    }
-  }
+    });
 }
