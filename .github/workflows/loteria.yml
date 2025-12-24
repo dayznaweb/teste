@@ -1,27 +1,54 @@
-name: BitLoteria_Turbo
+name: BitLoteria
 
 on:
-  workflow_dispatch: # Permite dar o "Play" manual
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *' # Roda a cada 6 horas automaticamente
+    - cron: '0 */6 * * *'
+
+# 🔒 Impede dois jobs ao mesmo tempo
+concurrency:
+  group: bitloteria
+  cancel-in-progress: false
 
 jobs:
   search:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Instalar Node.js
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0   # IMPORTANTE para pull --rebase funcionar
+
+      - name: Configurar Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Instalar Dependencias
-        run: npm install
+      - name: Instalar dependências
+        run: npm install secp256k1
 
-      - name: Executar Busca
+      - name: Executar busca
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        timeout-minutes: 340 # Para antes do limite de 6h do GitHub
-        run: node fast-loteria.js
+        timeout-minutes: 345
+        run: |
+          node fast-loteria.js || echo "⏱️ Timeout atingido, salvando progresso..."
+
+      - name: Commit e Push do Progresso
+        if: always()
+        run: |
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "action@github.com"
+
+          git add last_key.txt
+          git commit -m "Update progresso: $(cat last_key.txt)" || exit 0
+
+          # 🔄 Sincroniza com o remoto antes de enviar
+          git pull --rebase origin main
+          git push origin main
